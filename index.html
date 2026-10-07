@@ -485,17 +485,30 @@ function toast(title,body){const t=document.getElementById("toast");t.querySelec
 document.getElementById("toastOk").onclick=()=>document.getElementById("toast").hidden=true;
 const NOXR="この端末やブラウザは WebXR の AR に対応していないか、HTTPS で開かれていません。ARCore 対応の Android 端末の Chrome で、HTTPS で公開したこのページを開いてください。iPhone の Safari は現在 WebXR の AR に対応していません。";
 
+let xrOK=null;
+if(navigator.xr&&navigator.xr.isSessionSupported){navigator.xr.isSessionSupported("immersive-ar").then(v=>xrOK=v).catch(()=>xrOK=false);}else xrOK=false;
+let autoPlace=false;
+function xrErr(e){
+  const n=e&&e.name||"",m=String(e&&e.message||e);
+  if(n==="NotAllowedError"||n==="SecurityError")return "カメラの使用が許可されていないか、ボタン操作から時間がたちすぎました。Chrome のサイト設定でカメラを許可してから、もう一度 AR ボタンを押してください。（"+n+": "+m+"）";
+  if(n==="NotSupportedError")return "この端末では AR の機能が使えません。Play ストアで「Google Play Services for AR」をインストール・更新してから、もう一度お試しください。（"+n+": "+m+"）";
+  return (n?n+": ":"")+m;
+}
 async function startAR(){
   stopPlay();
-  let ok=false;try{ok=!!navigator.xr&&await navigator.xr.isSessionSupported("immersive-ar");}catch(e){}
-  if(!ok)return toast("AR を開始できません",NOXR);
+  if(xrOK===false||!navigator.xr)return toast("AR を開始できません",NOXR);
+  let s=null;
   try{
-    const s=await navigator.xr.requestSession("immersive-ar",{requiredFeatures:["hit-test"],optionalFeatures:["dom-overlay"],domOverlay:{root:document.getElementById("ui")}});
+    // requestSession must run right away inside the tap, before any other await
+    s=await navigator.xr.requestSession("immersive-ar",{optionalFeatures:["hit-test","dom-overlay","local-floor"],domOverlay:{root:document.getElementById("ui")}});
+  }catch(e){return toast("AR を開始できませんでした",xrErr(e));}
+  try{
     arSession=s;s.addEventListener("end",exitAR);s.addEventListener("select",onSelect);
     await renderer.xr.setSession(s);
     enterAR();
-    const vs=await s.requestReferenceSpace("viewer");hitSrc=await s.requestHitTestSource({space:vs});
-  }catch(e){toast("AR を開始できませんでした",String(e&&e.message||e));if(arSession)arSession.end();}
+  }catch(e){toast("AR を開始できませんでした",xrErr(e));try{s.end();}catch(_){}return;}
+  try{const vs=await s.requestReferenceSpace("viewer");hitSrc=await s.requestHitTestSource({space:vs});autoPlace=false;}
+  catch(e){hitSrc=null;autoPlace=true;hint("平面検出が使えないため、目の前に表示します","");}
 }
 function enterAR(){
   document.body.classList.add("ar");document.body.classList.remove("placed");
@@ -508,7 +521,7 @@ function exitAR(){
   skyMesh.visible=stars.visible=sea.visible=true;base.visible=false;world.visible=true;
   world.position.set(0,0,0);world.rotation.set(0,0,0);setWorldScale(1);setFogDen(.016);
   controls.enabled=true;arTop.hidden=true;hint(null);reticle.visible=false;
-  if(hitSrc){try{hitSrc.cancel();}catch(e){}}hitSrc=null;arSession=null;placed=false;
+  if(hitSrc){try{hitSrc.cancel();}catch(e){}}hitSrc=null;arSession=null;placed=false;autoPlace=false;
   setTimeout(()=>{resize.done=true;resize();},50);
 }
 function onSelect(){
@@ -523,14 +536,20 @@ function arFrame(xrFrame){
   if(!renderer.xr.isPresenting||!xrFrame)return;
   const cam=renderer.xr.getCamera(camera),bl=arSession&&arSession.renderState.baseLayer;
   const sc=cam.projectionMatrix.elements[5]*(bl?bl.framebufferHeight:innerHeight*devicePixelRatio)/2;cloudU.uScale.value=tyU.uScale.value=sc;
-  if(placed||!hitSrc)return;
+  if(placed)return;
+  if(autoPlace){ // no hit-test: put the map 0.9m ahead, 0.45m below the eyes
+    const cp=new THREE.Vector3(),fw=new THREE.Vector3();cam.getWorldPosition(cp);cam.getWorldDirection(fw);fw.y=0;
+    if(fw.lengthSq()<1e-4)return;fw.normalize();
+    arCenter.copy(cp).addScaledVector(fw,.9);arCenter.y-=.45;arAngle=Math.atan2(-fw.x,-fw.z);applyWorld();
+    world.visible=true;placed=true;document.body.classList.add("placed");setTimeout(()=>hint("1本指で回転・2本指で拡大縮小","下のスライダーで日時を動かせます"),1500);setTimeout(()=>{if(placed)hint(null);},5000);return;}
+  if(!hitSrc)return;
   const r=xrFrame.getHitTestResults(hitSrc);
   if(r.length){const pose=r[0].getPose(renderer.xr.getReferenceSpace());reticle.visible=true;reticle.matrix.fromArray(pose.transform.matrix);hint("画面をタップしてここに配置","枠の大きさは約70cmです");}
   else{reticle.visible=false;}
 }
 document.getElementById("arBtn").onclick=startAR;
 document.getElementById("arExit").onclick=()=>arSession&&arSession.end();
-document.getElementById("arReset").onclick=()=>{placed=false;world.visible=false;document.body.classList.remove("placed");hint("机や床にカメラを向けて","平面が見つかったらタップで配置");};
+document.getElementById("arReset").onclick=()=>{placed=false;if(!hitSrc)autoPlace=true;world.visible=false;document.body.classList.remove("placed");hint("机や床にカメラを向けて","平面が見つかったらタップで配置");};
 // keep taps on the overlay controls from placing the map
 ["timeline","arTop","toast","gest","card"].forEach(id=>document.getElementById(id).addEventListener("beforexrselect",e=>e.preventDefault()));
 // AR gestures: one finger rotates, two fingers scale
